@@ -11,6 +11,27 @@ import {
   stellarPublicKeySchema,
 } from "../lib/stellar-validation";
 
+// ─── Callback query-parameter schema ─────────────────────────────────────────
+
+/**
+ * Optional query parameters an anchor may include on a SEP-24 callback.
+ *
+ * The SEP-24 spec does not mandate specific query parameters, but anchors
+ * sometimes send `lang` or anchor-specific identifiers. This schema
+ * rejects unknown query parameters at the route boundary so an unexpected
+ * key (e.g. a crafted injection attempt) never reaches downstream logic.
+ */
+export const sep24CallbackQuerySchema = z
+  .object({
+    lang: z.string().min(2).max(10).optional(),
+  })
+  .strict();
+
+/** A Stellar transaction hash is a 32-byte value encoded as 64 hex chars. */
+export const sep24StellarTransactionHashSchema = z
+  .string()
+  .regex(/^[0-9a-fA-F]{64}$/, "must be a 64-character hexadecimal Stellar transaction hash");
+
 /** A Stellar public key (G…), checksum-validated via StrKey. */
 export const sep24AccountSchema = stellarPublicKeySchema;
 
@@ -55,6 +76,26 @@ function refineMemoPairing(
   }
 }
 
+function refineRefundMemoPairing(
+  value: { refundMemo?: string; refundMemoType?: "text" | "id" | "hash" },
+  ctx: z.RefinementCtx
+): void {
+  if (value.refundMemo && !value.refundMemoType) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["refundMemoType"],
+      message: "refundMemoType is required when refundMemo is supplied",
+    });
+  }
+  if (value.refundMemoType && !value.refundMemo) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["refundMemo"],
+      message: "refundMemo is required when refundMemoType is supplied",
+    });
+  }
+}
+
 const sharedFields = {
   assetCode: sep24AssetCodeSchema,
   assetIssuer: z.string().nullable().optional(),
@@ -65,6 +106,10 @@ const sharedFields = {
   memoType: sep24MemoTypeSchema.optional(),
   walletName: z.string().trim().min(1).max(120).optional(),
   anchorName: z.string().max(64).optional(),
+  refundAddress: sep24AccountSchema.optional(),
+  refundMemo: sep24MemoSchema,
+  refundMemoType: sep24MemoTypeSchema.optional(),
+  extraMetadata: z.record(z.string(), z.unknown()).optional(),
 };
 
 function validateNativeIssuer<
@@ -73,15 +118,20 @@ function validateNativeIssuer<
     assetIssuer?: string | null;
     memo?: string;
     memoType?: "text" | "id" | "hash";
+    refundMemo?: string;
+    refundMemoType?: "text" | "id" | "hash";
   }
 >(schema: z.ZodType<T>) {
-  return schema.refine(
-    (value) => !(value.assetCode === "XLM" && value.assetIssuer),
-    {
-      message: "XLM is a native asset and does not take an issuer",
-      path: ["assetIssuer"],
-    }
-  ).superRefine(refineMemoPairing);
+  return schema
+    .refine(
+      (value) => !(value.assetCode === "XLM" && value.assetIssuer),
+      {
+        message: "XLM is a native asset and does not take an issuer",
+        path: ["assetIssuer"],
+      }
+    )
+    .superRefine(refineMemoPairing)
+    .superRefine(refineRefundMemoPairing);
 }
 
 /** Strict request schema for starting either SEP-24 interactive flow. */
@@ -103,3 +153,4 @@ export const sep24WithdrawRequestSchema = validateNativeIssuer(
 export type Sep24InteractiveRequest = z.infer<typeof sep24InteractiveRequestSchema>;
 export type Sep24DepositRequest = z.infer<typeof sep24DepositRequestSchema>;
 export type Sep24WithdrawRequest = z.infer<typeof sep24WithdrawRequestSchema>;
+export type Sep24CallbackQuery = z.infer<typeof sep24CallbackQuerySchema>;

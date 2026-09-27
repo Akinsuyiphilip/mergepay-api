@@ -63,6 +63,10 @@ export const REDACT_CENSOR = "[REDACTED]";
 export const REDACT_PATHS: string[] = [
   "req.headers.authorization",
   "req.headers.cookie",
+  // Bracket notation: fast-redact only accepts dot paths for identifier-like
+  // keys, and these header names carry a dash.
+  'req.headers["proxy-authorization"]',
+  'req.headers["x-api-key"]',
   "res.headers.set-cookie",
   "authorization",
   "cookie",

@@ -177,6 +177,107 @@ describe("reqSerializer", () => {
     const result: SerializedRequest = reqSerializer(req);
     expect(result.id).toBe("req-abc123");
   });
+
+  it("redacts the whole authorization family and API-key headers", () => {
+    const req = {
+      method: "GET",
+      url: "/proxy",
+      headers: {
+        authorization: "Bearer secret",
+        "proxy-authorization": "Basic cHJveHk6c2VjcmV0",
+        "x-api-key": "key-123",
+        "content-type": "application/json",
+      },
+    };
+
+    const result: SerializedRequest = reqSerializer(req);
+    expect(result.headers.authorization).toBe("[REDACTED]");
+    expect(result.headers["proxy-authorization"]).toBe("[REDACTED]");
+    expect(result.headers["x-api-key"]).toBe("[REDACTED]");
+    expect(result.headers["content-type"]).toBe("application/json");
+  });
+
+  it("scrubs credential-shaped keys from the query", () => {
+    const req = {
+      method: "GET",
+      url: "/callback",
+      headers: {},
+      query: { token: "s3cr3t", access_token: "also-s3cr3t", page: "1" },
+    };
+
+    const result: SerializedRequest = reqSerializer(req);
+    // camelCase and snake_case spellings of the same credential both match.
+    expect(result.query).toEqual({
+      token: "[REDACTED]",
+      access_token: "[REDACTED]",
+      page: "1",
+    });
+    expect(JSON.stringify(result)).not.toContain("s3cr3t");
+  });
+
+  it("redacts credential-shaped parameters in the URL itself", () => {
+    // The query string is logged a second time inside `url`, so scrubbing
+    // `req.query` alone would leave the token one field over.
+    const result: SerializedRequest = reqSerializer({
+      method: "GET",
+      url: "/auth/callback?code=abc&access_token=s3cr3t&x-api-key=k-1&page=2",
+      headers: {},
+    });
+
+    expect(result.url).toBe(
+      "/auth/callback?code=abc&access_token=[REDACTED]&x-api-key=[REDACTED]&page=2"
+    );
+    expect(result.url).not.toContain("s3cr3t");
+  });
+
+  it("leaves a URL without credentials untouched", () => {
+    expect(
+      reqSerializer({ method: "GET", url: "/health/live", headers: {} }).url
+    ).toBe("/health/live");
+    expect(
+      reqSerializer({ method: "GET", url: "/health/live?probe=1", headers: {} }).url
+    ).toBe("/health/live?probe=1");
+  });
+
+  it("never lets circular query, params, or header values reach JSON.stringify", () => {
+    const circular: Record<string, unknown> = { page: "1" };
+    circular.self = circular;
+    const headerBag: Record<string, unknown> = { "user-agent": "ua" };
+    headerBag.loop = headerBag;
+
+    const result: SerializedRequest = reqSerializer({
+      method: "GET",
+      url: "/groups",
+      headers: headerBag,
+      query: circular,
+      params: circular,
+    });
+
+    let json = "";
+    expect(() => {
+      json = JSON.stringify(result);
+    }).not.toThrow();
+    expect(json).toContain("[CIRCULAR]");
+    expect(result.headers["user-agent"]).toBe("ua");
+    expect(result.query).toMatchObject({ page: "1", self: "[CIRCULAR]" });
+    expect(result.params).toMatchObject({ page: "1", self: "[CIRCULAR]" });
+  });
+
+  it("coerces non-string method/url and non-numeric port instead of copying objects", () => {
+    const result: SerializedRequest = reqSerializer({
+      method: { verb: "GET" },
+      url: ["a", "b"],
+      headers: {},
+      remoteAddress: 12345,
+      remotePort: { port: 1 },
+    });
+
+    expect(result.method).toBe("UNKNOWN");
+    expect(result.url).toBe("UNKNOWN");
+    expect(result).not.toHaveProperty("remoteAddress");
+    expect(result).not.toHaveProperty("remotePort");
+    expect(() => JSON.stringify(result)).not.toThrow();
+  });
 });
 
 // ─── resSerializer ──────────────────────────────────────────────────────────
@@ -290,6 +391,36 @@ describe("resSerializer", () => {
     const result: SerializedResponse = resSerializer(res);
     expect(result.statusCode).toBe(500);
     expect(result.headers).toEqual({});
+  });
+
+  it("redacts the authorization family on the way out too", () => {
+    const res = {
+      statusCode: 401,
+      headers: {
+        "proxy-authorization": "Basic cHJveHk6c2VjcmV0",
+        "x-api-key": "key-123",
+        "www-authenticate": "Bearer",
+      },
+    };
+
+    const result: SerializedResponse = resSerializer(res);
+    expect(result.headers["proxy-authorization"]).toBe("[REDACTED]");
+    expect(result.headers["x-api-key"]).toBe("[REDACTED]");
+    expect(result.headers["www-authenticate"]).toBe("Bearer");
+  });
+
+  it("never lets a circular header value reach JSON.stringify", () => {
+    const headerBag: Record<string, unknown> = { "content-type": "application/json" };
+    headerBag.loop = headerBag;
+
+    const result: SerializedResponse = resSerializer({ statusCode: 200, headers: headerBag });
+
+    let json = "";
+    expect(() => {
+      json = JSON.stringify(result);
+    }).not.toThrow();
+    expect(json).toContain("[CIRCULAR]");
+    expect(result.headers["content-type"]).toBe("application/json");
   });
 });
 

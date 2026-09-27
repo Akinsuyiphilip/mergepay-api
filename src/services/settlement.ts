@@ -10,6 +10,56 @@ import { isSupportedAsset } from "../lib/money";
 
 export type SplitType = "equal" | "custom" | "percentage";
 
+/**
+ * Stable machine-readable codes for the errors this engine can raise.
+ *
+ * The engine is pure and its callers are spread across the API (the expense
+ * creation route, the balance preview routes, and this file itself), so the
+ * codes — not prose — are the contract a client branches on. They are
+ * exported so routes can map them onto HTTP responses without re-deriving
+ * the distinction from message text.
+ */
+export const SETTLEMENT_ENGINE_ERROR_CODES = {
+  /** The expense total was missing, zero, or negative. */
+  INVALID_SPLIT_AMOUNT: "INVALID_SPLIT_AMOUNT",
+  /** A split was requested with no participants at all. */
+  INVALID_SPLIT_PARTICIPANT: "INVALID_SPLIT_PARTICIPANT",
+  /** Custom amounts did not sum exactly to the expense total. */
+  INVALID_SPLIT_SUM: "INVALID_SPLIT_SUM",
+  /** Percentage weights did not sum to 100. */
+  INVALID_SPLIT_PERCENT: "INVALID_SPLIT_PERCENT",
+  /** The asset is outside Mergepay's supported settlement registry. */
+  UNSUPPORTED_ASSET: "UNSUPPORTED_ASSET",
+} as const;
+
+export type SettlementEngineErrorCode =
+  (typeof SETTLEMENT_ENGINE_ERROR_CODES)[keyof typeof SETTLEMENT_ENGINE_ERROR_CODES];
+
+/**
+ * An error raised by the settlement engine, carrying a stable code.
+ *
+ * Deliberately not an `AppError`: the engine has no HTTP opinion, and routes
+ * decide how a code maps to a status. The message is written for clients —
+ * it names the request's own fields, never internal state — so a caller may
+ * forward it verbatim once the code has been validated against this map.
+ */
+export class SettlementEngineError extends Error {
+  readonly code: SettlementEngineErrorCode;
+
+  constructor(code: SettlementEngineErrorCode, message: string) {
+    super(message);
+    this.name = "SettlementEngineError";
+    this.code = code;
+  }
+}
+
+/** Narrow an unknown thrown value to an engine error. */
+export function isSettlementEngineError(
+  error: unknown
+): error is SettlementEngineError {
+  return error instanceof SettlementEngineError;
+}
+
 export interface ShareInput {
   userId: string;
   amount?: string; // custom
@@ -30,19 +80,31 @@ export function computeShares(
   splitType: SplitType,
   shares: ShareInput[]
 ): ComputedShare[] {
-  if (shares.length === 0) throw new Error("At least one participant required");
+  if (shares.length === 0)
+    throw new SettlementEngineError(
+      SETTLEMENT_ENGINE_ERROR_CODES.INVALID_SPLIT_PARTICIPANT,
+      "At least one participant required"
+    );
   const total = toStroops(amount);
-  if (total <= 0n) throw new Error("Amount must be greater than zero");
+  if (total <= 0n)
+    throw new SettlementEngineError(
+      SETTLEMENT_ENGINE_ERROR_CODES.INVALID_SPLIT_AMOUNT,
+      "Amount must be greater than zero"
+    );
 
   if (splitType === "custom") {
     const computed = shares.map((s) => {
       if (s.amount === undefined)
-        throw new Error("custom split requires an amount per share");
+        throw new SettlementEngineError(
+          SETTLEMENT_ENGINE_ERROR_CODES.INVALID_SPLIT_SUM,
+          "Custom split requires an amount for every participant"
+        );
       return { userId: s.userId, stroops: toStroops(s.amount) };
     });
     const sum = computed.reduce((a, c) => a + c.stroops, 0n);
     if (sum !== total) {
-      throw new Error(
+      throw new SettlementEngineError(
+        SETTLEMENT_ENGINE_ERROR_CODES.INVALID_SPLIT_SUM,
         `Custom amounts must sum to ${amount} (got ${fromStroops(sum)})`
       );
     }
@@ -56,11 +118,17 @@ export function computeShares(
     let pctTotal = 0;
     for (const s of shares) {
       if (s.percent === undefined)
-        throw new Error("percentage split requires a percent per share");
+        throw new SettlementEngineError(
+          SETTLEMENT_ENGINE_ERROR_CODES.INVALID_SPLIT_PERCENT,
+          "Percentage split requires a percent for every participant"
+        );
       pctTotal += s.percent;
     }
     if (Math.abs(pctTotal - 100) > 0.001) {
-      throw new Error(`Percentages must sum to 100 (got ${pctTotal})`);
+      throw new SettlementEngineError(
+        SETTLEMENT_ENGINE_ERROR_CODES.INVALID_SPLIT_PERCENT,
+        `Percentages must sum to 100 (got ${pctTotal})`
+      );
     }
     const computed = shares.map((s) => {
       // total * percent / 100, in stroops
@@ -168,7 +236,8 @@ export function assertSupportedSettlementAsset(
   assetIssuer: string | null
 ): void {
   if (!isSupportedAsset(assetCode, assetIssuer)) {
-    throw new Error(
+    throw new SettlementEngineError(
+      SETTLEMENT_ENGINE_ERROR_CODES.UNSUPPORTED_ASSET,
       `Unsupported settlement asset "${assetCode}"` +
         (assetIssuer ? ` (issuer ${assetIssuer})` : "")
     );

@@ -10,6 +10,9 @@ import {
   type Suggestion,
 } from "./settlement";
 import { getAssetConfig } from "./assets";
+import { toStroops } from "./money";
+import { Errors } from "../errors";
+import { Prisma } from "@prisma/client";
 
 /**
  * The asset a group settles in: derived from its expenses, default XLM.
@@ -160,4 +163,59 @@ export async function userNetInGroup(
 ): Promise<string> {
   const balances = await loadGroupBalances(groupId);
   return balances.find((b) => b.userId === userId)?.net ?? "0";
+}
+
+/**
+ * Verify that the settlement amount does not exceed the remaining unpaid debt
+ * between the payer and receiver. Used during settlement creation to prevent
+ * over-settlement.
+ */
+export async function verifySettlementLimit(
+  tx: Prisma.TransactionClient,
+  groupId: string,
+  fromUserId: string,
+  toUserId: string,
+  settlementAmount: string
+): Promise<void> {
+  const [expenses, settlements] = await Promise.all([
+    tx.expense.findMany({
+      where: { groupId },
+      include: { shares: { where: { OR: [{ userId: fromUserId }, { userId: toUserId }] } } },
+    }),
+    tx.settlement.findMany({
+      where: {
+        groupId,
+        status: { not: "failed" }, // Pending and submitted settlements reduce the available limit
+        OR: [
+          { fromUserId, toUserId },
+          { fromUserId: toUserId, toUserId: fromUserId },
+        ],
+      },
+    }),
+  ]);
+
+  let debtStroops = 0n;
+
+  for (const e of expenses) {
+    for (const s of e.shares) {
+      if (s.status === "settled") continue;
+      if (e.payerUserId === toUserId && s.userId === fromUserId) {
+        debtStroops += toStroops(s.shareAmount.toString());
+      } else if (e.payerUserId === fromUserId && s.userId === toUserId) {
+        debtStroops -= toStroops(s.shareAmount.toString());
+      }
+    }
+  }
+
+  for (const s of settlements) {
+    if (s.fromUserId === fromUserId && s.toUserId === toUserId) {
+      debtStroops -= toStroops(s.amount.toString());
+    } else if (s.fromUserId === toUserId && s.toUserId === fromUserId) {
+      debtStroops += toStroops(s.amount.toString());
+    }
+  }
+
+  if (toStroops(settlementAmount) > debtStroops) {
+    throw Errors.badRequest("OVER_SETTLEMENT", "Settlement amount exceeds outstanding debt balance");
+  }
 }

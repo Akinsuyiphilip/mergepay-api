@@ -83,6 +83,21 @@ export const ErrorCode = {
    * and sign it promptly. See src/services/sep10.ts.
    */
   CHALLENGE_EXPIRED: "CHALLENGE_EXPIRED",
+  /**
+   * 401 — the signed SEP-10 challenge declares a window that has not opened
+   * yet (its `minTime` is beyond the clock-skew tolerance). Distinct from
+   * CHALLENGE_EXPIRED (window closed) and UNAUTHORIZED (structural or
+   * signature failure): the envelope's bounds are present and usable but do
+   * not describe a presently redeemable challenge. See src/services/sep10.ts.
+   */
+  CHALLENGE_NOT_YET_VALID: "CHALLENGE_NOT_YET_VALID",
+  /**
+   * 401 — the signed SEP-10 challenge declares a window longer than the
+   * validity this server grants, so it is not an envelope this server issued
+   * however well it otherwise verifies. Distinct from CHALLENGE_EXPIRED and
+   * UNAUTHORIZED for the same reason. See src/services/sep10.ts.
+   */
+  CHALLENGE_WINDOW_TOO_LONG: "CHALLENGE_WINDOW_TOO_LONG",
   INVALID_CURSOR: "INVALID_CURSOR",
   // 401
   UNAUTHORIZED: "UNAUTHORIZED",
@@ -190,6 +205,16 @@ export const Errors = {
    */
   challengeExpired: (msg: string, details?: unknown) =>
     new AppError(401, ErrorCode.CHALLENGE_EXPIRED, msg, details),
+
+  /** The challenge's `minTime` has not been reached — bounds are usable but
+   * the window has not opened. See CHALLENGE_NOT_YET_VALID. */
+  challengeNotYetValid: (msg: string, details?: unknown) =>
+    new AppError(401, ErrorCode.CHALLENGE_NOT_YET_VALID, msg, details),
+
+  /** The challenge's window outlives the validity this server issues. See
+   * CHALLENGE_WINDOW_TOO_LONG. */
+  challengeWindowTooLong: (msg: string, details?: unknown) =>
+    new AppError(401, ErrorCode.CHALLENGE_WINDOW_TOO_LONG, msg, details),
 
   forbidden: (msg = "You do not have access to this resource") =>
     new AppError(403, ErrorCode.FORBIDDEN, msg),

@@ -14,6 +14,13 @@
  */
 import type { FastifyInstance } from "fastify";
 import { config } from "../config";
+import { prisma } from "../db";
+import { requireUser } from "../plugins/auth";
+import { anchorService } from "../services/anchor";
+import { auditTx } from "../services/audit";
+import { serializeAnchorSession } from "../serializers";
+import { validateAsset } from "../services/assets";
+import { rateLimited } from "../lib/rate-limit";
 import { ipKey } from "../services/rate-limit-keys";
 import { openApiBody } from "../lib/openapi";
 import {
@@ -21,8 +28,110 @@ import {
   sep24CallbackSchema,
   verifyAnchorToken,
 } from "../services/sep24-anchor-token";
+import {
+  sep24CallbackQuerySchema,
+  sep24DepositRequestSchema,
+  sep24WithdrawRequestSchema,
+} from "../validations/sep24";
 
 export default async function sep24Routes(app: FastifyInstance) {
+  const initLimit = rateLimited("anchorInit");
+
+  async function handleStartInteractive(
+    kind: "deposit" | "withdrawal",
+    req: any,
+    requestSchema = kind === "deposit"
+      ? sep24DepositRequestSchema
+      : sep24WithdrawRequestSchema
+  ) {
+    const auth = requireUser(req);
+    const body = requestSchema.parse(req.body);
+
+    validateAsset(body.assetCode);
+
+    const t = await anchorService.getToml(config.ANCHOR_HOME_DOMAIN);
+    const challenge = await anchorService.getChallenge(
+      t.webAuthEndpoint,
+      auth.stellarPublicKey
+    );
+
+    const session = await prisma.$transaction(async (tx) => {
+      const created = await tx.anchorSession.create({
+        data: {
+          userId: auth.id,
+          anchorName: body.anchorName ?? config.ANCHOR_NAME,
+          kind,
+          assetCode: body.assetCode,
+          status: "incomplete",
+        },
+      });
+      await auditTx(tx, {
+        userId: auth.id,
+        action: "anchor_session.start",
+        entityType: "anchor_session",
+        entityId: created.id,
+        metadata: { kind, assetCode: body.assetCode },
+      });
+      return created;
+    });
+
+    return {
+      session: serializeAnchorSession(session),
+      challenge,
+    };
+  }
+
+  app.post(
+    "/api/sep24/deposit",
+    {
+      preHandler: [app.authenticate],
+      ...initLimit,
+      schema: {
+        tags: ["SEP-24"],
+        summary: "Initiate SEP-24 deposit flow with Zod validation",
+        description:
+          "Validates payload with Zod and initiates a SEP-24 deposit interactive session.",
+        body: openApiBody(sep24DepositRequestSchema),
+        response: {
+          200: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              session: { type: "object", additionalProperties: true },
+              challenge: { type: "object", additionalProperties: true },
+            },
+          },
+        },
+      },
+    },
+    (req) => handleStartInteractive("deposit", req)
+  );
+
+  app.post(
+    "/api/sep24/withdraw",
+    {
+      preHandler: [app.authenticate],
+      ...initLimit,
+      schema: {
+        tags: ["SEP-24"],
+        summary: "Initiate SEP-24 withdrawal flow with Zod validation",
+        description:
+          "Validates payload with Zod and initiates a SEP-24 withdrawal interactive session.",
+        body: openApiBody(sep24WithdrawRequestSchema),
+        response: {
+          200: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              session: { type: "object", additionalProperties: true },
+              challenge: { type: "object", additionalProperties: true },
+            },
+          },
+        },
+      },
+    },
+    (req) => handleStartInteractive("withdrawal", req)
+  );
   // Rate limiting here is abuse protection for an endpoint that is
   // unauthenticated until the token is checked. It never substitutes for that
   // check, which remains the authorization gate. Keyed by IP because there is
@@ -42,6 +151,7 @@ export default async function sep24Routes(app: FastifyInstance) {
         summary: "Process SEP-24 anchor callback",
         description:
           "Accepts and processes SEP-24 transaction status callbacks signed with the anchor SEP-10 JWT token.",
+        querystring: openApiBody(sep24CallbackQuerySchema),
         body: openApiBody(sep24CallbackSchema),
         response: {
           200: {
@@ -61,6 +171,8 @@ export default async function sep24Routes(app: FastifyInstance) {
       // Verified before the body is parsed, so an unauthenticated caller never
       // reaches the schema, the database, or the audit log.
       await verifyAnchorToken(req.headers.authorization);
+
+      sep24CallbackQuerySchema.parse(req.query ?? {});
 
       const callback = sep24CallbackSchema.parse(req.body ?? {});
       const result = await applySep24Callback(callback);

@@ -9,7 +9,7 @@ import { requireMembership, requireAdmin } from "../services/access";
 import { groupMembership, requireGroupRole } from "../plugins/group-access";
 import { stellar } from "../services/stellar";
 import { inviteCode } from "../services/codes";
-import { ADMIN_AUDIT_ACTIONS, auditTx } from "../services/audit";
+import { auditGroupMemberActionTx, auditTx } from "../services/audit";
 import { AuditAction } from "../services/audit-actions";
 import {
   serializeGroup,
@@ -17,6 +17,17 @@ import {
   serializeInvite,
   serializeMember,
 } from "../serializers";
+import {
+  createGroupSchema,
+  updateGroupSchema,
+  directInviteSchema,
+  legacyInviteSchema,
+  joinGroupSchema,
+  memberRoleSchema,
+  changeMemberRoleSchema,
+  groupParamsSchema,
+  groupMemberParamsSchema,
+} from "../schemas/groups";
 import {
   groupPrimaryAsset,
   loadGroupBalances,
@@ -47,52 +58,32 @@ export function clearGroupBalanceCache(): void {
 
 /*
  * Request schemas shared by the handlers (for validation) and the route
- * OpenAPI annotations (for documentation), so the two can never drift. The
- * handlers below parse with these same objects rather than re-declaring the
- * shapes inline.
+ * OpenAPI annotations (for documentation). The strict bodies, params, and
+ * role rules live in src/schemas/groups.ts (issue #707) — this file binds
+ * them to the routes rather than re-declaring the shapes, so the documented
+ * shape and the enforced shape are the same objects and cannot drift.
  */
-const createGroupSchema = z.object({
-  name: z.string().min(1).max(60),
-  description: z.string().max(280).optional(),
-});
-
-const groupParamsSchema = z.object({ id: z.string() });
-const groupIdParamsSchema = z.object({ id: z.string().min(1).max(64) });
-const groupMemberParamsSchema = z.object({
-  id: z.string(),
-  memberId: z.string(),
-});
-
-const directInviteBodySchema = z.object({
-  publicKey: stellarAccountIdSchema,
-});
-
-const legacyInviteBodySchema = z.object({
-  maxUses: z.number().int().min(1).optional(),
-  expiresInHours: z.number().int().min(1).optional(),
-});
 
 /**
  * Documentation-only body schema for `POST /groups/:id/invite`, which accepts
  * either a Stellar public key or the legacy `maxUses`/`expiresInHours` pair
  * (and an empty body). A single permissive schema documents both branches
  * without letting Fastify's request validation reject one of them — the
- * handler still enforces each branch with its own schema below.
+ * handler still enforces each branch with its own strict schema below.
  */
-const inviteBodyDocSchema = z.object({
-  publicKey: stellarAccountIdSchema.optional(),
-  maxUses: z.number().int().min(1).optional(),
-  expiresInHours: z.number().int().min(1).optional(),
-});
+const inviteBodyDocSchema = z
+  .object({
+    publicKey: stellarAccountIdSchema.optional(),
+    maxUses: z.number().int().min(1).optional(),
+    expiresInHours: z.number().int().min(1).optional(),
+  });
 
-const joinGroupSchema = z.object({ code: z.string().min(1) });
-
-const memberRoleSchema = z.object({ role: z.enum(["admin", "member"]) });
-
-const changeMemberRoleSchema = z.object({
-  userId: z.string().min(1).max(64),
-  role: z.enum(["admin", "member"]),
-});
+/** Documentation-only body for `PATCH /groups/:id` (the strict one is `updateGroupSchema`). */
+const updateGroupDocSchema = z
+  .object({
+    name: z.string().optional(),
+    description: z.string().nullable().optional(),
+  });
 
 export default async function groupRoutes(app: FastifyInstance) {
   app.addHook("preHandler", app.authenticate);
@@ -250,7 +241,7 @@ export default async function groupRoutes(app: FastifyInstance) {
       },
     },
     async (req) => {
-    const { id } = groupIdParamsSchema.parse(req.params);
+    const { id } = groupParamsSchema.parse(req.params);
 
     const cached = groupBalanceCache.get(id);
     if (cached && cached.expiresAt > Date.now()) {
@@ -368,6 +359,62 @@ export default async function groupRoutes(app: FastifyInstance) {
     };
   });
 
+  // -- update (metadata) ------------------------------------------------------
+  //
+  // The request body is validated by `updateGroupSchema` before any
+  // authorization work runs, so a malformed payload is a 400 regardless of
+  // who sent it. Treasury fields are deliberately absent from the schema:
+  // rotating the treasury account is the treasury-enable route's job, with
+  // its own funding checks and audit action, and a metadata update must not
+  // be able to touch signing configuration.
+  app.patch(
+    "/groups/:id",
+    {
+      preHandler: requireGroupRole("admin", { param: "id" }),
+      schema: {
+        tags: ["Groups"],
+        summary: "Update a group",
+        description:
+          "Admin-only. Updates the group's name and/or description. Treasury configuration is managed on its own endpoint and cannot be changed here.",
+        params: openApiIdParams(),
+        body: openApiBody(updateGroupDocSchema),
+        response: {
+          ...openApiEnvelope("group"),
+          ...openApiErrorResponses(400, 401, 403, 404),
+        },
+      },
+    },
+    async (req) => {
+    const auth = requireUser(req);
+    const { id } = groupParamsSchema.parse(req.params);
+    // Strict parse: unknown keys (including treasury fields) are a 400.
+    const body = updateGroupSchema.parse(req.body);
+
+    const group = await prisma.$transaction(async (tx) => {
+      await requireAdmin(id, auth.id, tx);
+      const updated = await tx.group.update({
+        where: { id },
+        data: {
+          ...(body.name !== undefined && { name: body.name }),
+          ...(body.description !== undefined && { description: body.description }),
+        },
+      });
+      await auditTx(tx, {
+        userId: auth.id,
+        groupId: id,
+        action: "group.update",
+        entityType: "group",
+        entityId: id,
+        metadata: {
+          ...(body.name !== undefined && { name: body.name }),
+          ...(body.description !== undefined && { description: body.description }),
+        },
+      });
+      return updated;
+    });
+    return { group: serializeGroup(group) };
+  });
+
   // -- invite (by public key or invite code) ---------------------------------
   app.post(
     "/groups/:id/invite",
@@ -408,7 +455,7 @@ export default async function groupRoutes(app: FastifyInstance) {
       req.body &&
       "publicKey" in req.body
     ) {
-      const body = directInviteBodySchema.parse(req.body);
+      const body = directInviteSchema.parse(req.body);
 
       // The admin check and the invitation write happen inside one
       // transaction so a concurrent demotion/removal of `auth.id` between
@@ -473,7 +520,7 @@ export default async function groupRoutes(app: FastifyInstance) {
     }
 
     // Legacy invite code generation
-    const body = legacyInviteBodySchema.parse(req.body ?? {});
+    const body = legacyInviteSchema.parse(req.body ?? {});
 
     const expiresAt = body.expiresInHours
       ? new Date(Date.now() + body.expiresInHours * 3600_000)
@@ -653,13 +700,16 @@ export default async function groupRoutes(app: FastifyInstance) {
         data: { role: body.role },
         include: { user: true },
       });
-      await auditTx(tx, {
+      await auditGroupMemberActionTx(tx, {
         userId: auth.id,
         groupId: id,
-        action: ADMIN_AUDIT_ACTIONS.MEMBER_ROLE_UPDATED,
-        entityType: "group_member",
-        entityId: memberId,
-        metadata: { previousRole: member.role, role: body.role },
+        memberId,
+        action: AuditAction.GROUP_MEMBER_ROLE_CHANGE,
+        metadata: {
+          targetUserId: memberId,
+          previousRole: member.role,
+          newRole: body.role,
+        },
       });
       return result;
     });
@@ -729,14 +779,12 @@ export default async function groupRoutes(app: FastifyInstance) {
         where: { groupId_userId: { groupId: id, userId: memberId } },
       });
 
-      await auditTx(tx, {
+      await auditGroupMemberActionTx(tx, {
         userId: auth.id,
         groupId: id,
+        memberId,
         action: AuditAction.GROUP_MEMBER_REMOVE,
-        entityType: "group",
-        entityId: id,
-        outcome: "success",
-        metadata: { removedUserId: memberId, removedRole: target.role },
+        metadata: { targetUserId: memberId, removedRole: target.role },
       });
     });
 
@@ -815,13 +863,11 @@ export default async function groupRoutes(app: FastifyInstance) {
         data: { role: body.role },
       });
 
-      await auditTx(tx, {
+      await auditGroupMemberActionTx(tx, {
         userId: auth.id,
         groupId: id,
-        action: "group.member_role_change",
-        entityType: "group_member",
-        entityId: body.userId,
-        outcome: "success",
+        memberId: body.userId,
+        action: AuditAction.GROUP_MEMBER_ROLE_CHANGE,
         metadata: {
           targetUserId: body.userId,
           previousRole: target.role,

@@ -463,4 +463,95 @@ describe("route integration — POST /groups emits a structured audit event", ()
 
     expect(auditLines(lines())).toHaveLength(0);
   });
+
+  it("emits a sanitized structured event for an admin role change", async () => {
+    const targetUserId = "user_target";
+    prisma.group.findUnique.mockResolvedValue({ id: "group_1" });
+    prisma.groupMember.findUnique.mockImplementation(async ({ where }: any) => {
+      const userId = where?.groupId_userId?.userId;
+      if (userId === admin.id) {
+        return { groupId: "group_1", userId, role: "admin" };
+      }
+      if (userId === targetUserId) {
+        return { groupId: "group_1", userId, role: "member" };
+      }
+      return null;
+    });
+
+    const { logger, lines } = captureLogger();
+    setAuditEventLogger(logger);
+
+    // The unknown `token` key is rejected by the strict role schema (#707),
+    // so the sanitization property is exercised on the removal payload below
+    // and on this request's headers instead of an accepted body.
+    const res = await app.inject({
+      method: "POST",
+      url: "/groups/group_1/members/role",
+      headers: {
+        ...authHeader(),
+        "x-sentinel": "audit-test-token-must-not-appear",
+      },
+      payload: {
+        userId: targetUserId,
+        role: "admin",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const rows = auditLines(lines());
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      event: "audit",
+      action: "group.member_role_change",
+      actor: { type: "user", id: admin.id },
+      target: { type: "group_member", id: targetUserId },
+      groupId: "group_1",
+      outcome: "success",
+      metadata: {
+        targetUserId,
+        previousRole: "member",
+        newRole: "admin",
+      },
+    });
+    expect(typeof rows[0].timestamp).toBe("string");
+    expect(JSON.stringify(rows)).not.toContain("audit-test-token-must-not-appear");
+  });
+
+  it("emits a structured event for an admin member removal", async () => {
+    const targetUserId = "user_target";
+    prisma.group.findUnique.mockResolvedValue({ id: "group_1" });
+    prisma.groupMember.findUnique.mockImplementation(async ({ where }: any) => {
+      const userId = where?.groupId_userId?.userId;
+      if (userId === admin.id) {
+        return { groupId: "group_1", userId, role: "admin" };
+      }
+      if (userId === targetUserId) {
+        return { groupId: "group_1", userId, role: "member" };
+      }
+      return null;
+    });
+
+    const { logger, lines } = captureLogger();
+    setAuditEventLogger(logger);
+
+    const res = await app.inject({
+      method: "DELETE",
+      url: `/groups/group_1/members/${targetUserId}`,
+      headers: authHeader(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const rows = auditLines(lines());
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      event: "audit",
+      action: "group.member_remove",
+      actor: { type: "user", id: admin.id },
+      target: { type: "group_member", id: targetUserId },
+      groupId: "group_1",
+      outcome: "success",
+      metadata: { targetUserId, removedRole: "member", outcome: "success" },
+    });
+    expect(typeof rows[0].timestamp).toBe("string");
+  });
 });

@@ -58,6 +58,7 @@ import {
 import {
   loadGroupBalancesWithSuggestionsByAsset,
   groupPrimaryAsset,
+  verifySettlementLimit,
 } from "../services/group-balances";
 import { balanceAssetKey, type Suggestion } from "../services/settlement";
 import { validateAsset, validateAmount } from "../services/assets";
@@ -376,6 +377,14 @@ export default async function settlementRoutes(app: FastifyInstance) {
       resourceId: groupId,
       payload: body,
       operation: async (tx) => {
+        await verifySettlementLimit(
+          tx,
+          groupId,
+          auth.id,
+          body.toUserId,
+          body.amount
+        );
+
         const code = shortCode();
         const { expiresAt, validitySeconds } = intentExpiry(body.validitySeconds);
         const settlement = await tx.settlement.create({

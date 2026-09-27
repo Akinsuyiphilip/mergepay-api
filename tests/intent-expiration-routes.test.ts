@@ -24,7 +24,12 @@ const h = vi.hoisted(() => {
     findUnique: vi.fn(),
     findFirst: vi.fn(),
     findUniqueOrThrow: vi.fn(),
-    findMany: vi.fn(async () => []),
+    findMany: vi.fn(async () => [
+      {
+        payerUserId: "user_2",
+        shares: [{ userId: "user_1", shareAmount: "1000", status: "pending" }],
+      },
+    ]),
   });
   const prisma: any = {
     expense: model(),

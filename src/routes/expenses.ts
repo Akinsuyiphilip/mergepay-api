@@ -13,7 +13,11 @@ import { Errors } from "../errors";
 import { requireUser } from "../plugins/auth";
 import { requireMembership } from "../services/access";
 import { requireGroupRole } from "../plugins/group-access";
-import { computeShares, type SplitType } from "../services/settlement";
+import {
+  computeShares,
+  isSettlementEngineError,
+  type SplitType,
+} from "../services/settlement";
 import { shortCode } from "../services/codes";
 import { serializeExpense } from "../serializers";
 import {
@@ -40,6 +44,13 @@ const expenseInclude = {
 
 export default async function expenseRoutes(app: FastifyInstance) {
   app.addHook("preHandler", app.authenticate);
+
+  // Every route below carries a `requireGroupRole` guard (issue #356), which
+  // rejects a non-member before the handler reads or writes anything. Routes
+  // addressed by `/expenses/:id` resolve the group from the expense row via
+  // the guard's `fromExpense` option; the handlers still re-check membership
+  // inside their transaction where the write happens — see
+  // src/plugins/group-access.ts.
 
   // -- create -----------------------------------------------------------------
   app.post(
@@ -84,8 +95,13 @@ export default async function expenseRoutes(app: FastifyInstance) {
     let computed;
     try {
       computed = computeShares(body.amount, body.splitType as SplitType, body.shares);
-    } catch (e: any) {
-      throw Errors.badRequest("invalid_split", e?.message ?? "Invalid split");
+    } catch (e) {
+      // The engine's errors are all client mistakes carrying a stable code;
+      // the route forwards code + message so a client can branch without
+      // parsing prose. An unexpected error is not a split problem — rethrow
+      // it rather than disguising it as one.
+      if (!isSettlementEngineError(e)) throw e;
+      throw Errors.badRequest(e.code, e.message);
     }
 
     const participantIds = [...new Set(computed.map((share) => share.userId))];
@@ -198,6 +214,7 @@ export default async function expenseRoutes(app: FastifyInstance) {
   app.get(
     "/expenses/:id",
     {
+      preHandler: requireGroupRole("member", { param: "id", fromExpense: true }),
       schema: {
         tags: ["Expenses"],
         summary: "Get an expense",
@@ -226,6 +243,7 @@ export default async function expenseRoutes(app: FastifyInstance) {
   app.patch(
     "/expenses/:id",
     {
+      preHandler: requireGroupRole("member", { param: "id", fromExpense: true }),
       schema: {
         tags: ["Expenses"],
         summary: "Update an expense",
@@ -283,6 +301,7 @@ export default async function expenseRoutes(app: FastifyInstance) {
   app.delete(
     "/expenses/:id",
     {
+      preHandler: requireGroupRole("member", { param: "id", fromExpense: true }),
       schema: {
         tags: ["Expenses"],
         summary: "Delete an expense",

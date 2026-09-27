@@ -9,6 +9,12 @@ const h = vi.hoisted(() => {
     create: vi.fn(),
     update: vi.fn(),
     updateMany: vi.fn(),
+    findMany: vi.fn(async () => [
+      {
+        payerUserId: "payer_1",
+        shares: [{ userId: "user_1", shareAmount: "1000", status: "pending" }],
+      },
+    ]),
   });
   const prisma: any = {
     expense: model(),

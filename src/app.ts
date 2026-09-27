@@ -36,6 +36,7 @@ import { formatErrorResponse } from "./utils/error-response";
 import { isGlobalRateLimitExempt, rateLimitPolicies } from "./lib/rate-limit";
 import { AppError, ErrorCode } from "./lib/errors";
 import { buildLoggerOptions, nullLogDestination } from "./lib/logger";
+import { buildCorsOptions } from "./lib/cors";
 import { PrismaRateLimitStore } from "./services/rate-limit-store";
 import { getReadiness } from "./services/health";
 import { installMultipartGuard } from "./lib/multipart-guard";
@@ -197,33 +198,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       preload: true,
     },
   });
-  const allowAll = config.WEB_URL === "*";
-  const allowed = config.WEB_URL
-    .split(",")
-    .map((o) => o.trim().replace(/\/+$/, ""))
-    .filter(Boolean);
-  const allowVercelPreviews = allowed.some((o) => o.endsWith(".vercel.app"));
-  const allowMethods = config.CORS_ALLOW_METHODS.split(",").map((m) => m.trim().toUpperCase());
-  const allowHeaders = config.CORS_ALLOW_HEADERS.split(",").map((h) => h.trim());
-  const exposeHeaders = config.CORS_EXPOSE_HEADERS.split(",").map((h) => h.trim());
-  await app.register(cors, {
-    origin: allowAll
-      ? true
-      : (origin, cb) => {
-          if (!origin) return cb(null, true);
-          const normalized = origin.replace(/\/+$/, "");
-          if (allowed.includes(normalized)) return cb(null, true);
-          if (allowVercelPreviews && normalized.endsWith(".vercel.app")) {
-            return cb(null, true);
-          }
-          return cb(null, false);
-        },
-    credentials: config.CORS_ALLOW_CREDENTIALS,
-    methods: allowMethods,
-    allowedHeaders: allowHeaders,
-    exposedHeaders: exposeHeaders,
-    maxAge: config.CORS_MAX_AGE,
-  });
+  // CORS — explicit, environment-driven options built by src/lib/cors.ts
+  // (WEB_URL and the CORS_* variables; see .env.example). Registered here,
+  // after helmet and before rate limiting, so a browser's preflight — which
+  // never carries an Authorization header — is answered 204 inside the plugin's
+  // onRequest hook instead of reaching an auth guard or spending rate-limit
+  // budget it does not need.
+  await app.register(cors, buildCorsOptions(config));
   // Global default limit. Sensitive routes (SEP-10 auth, settlement and
   // treasury submission, anchor initiation and polling) override this with
   // their own bucket — see src/lib/rate-limit.ts for the policy table and the
@@ -303,6 +284,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     "/api/treasury/proposals/:id/signatures",
     "/anchors/deposit",
     "/anchors/withdraw",
+    "/api/sep24/deposit",
+    "/api/sep24/withdraw",
     "/anchors/sessions/:id/complete",
     "/anchors/webhook",
     "/api/webhooks/sep24",
