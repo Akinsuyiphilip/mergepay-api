@@ -65,6 +65,7 @@ import { config } from "../config";
 import { Errors } from "../errors";
 import { ProviderError, retryAfterSeconds } from "../lib/provider-error";
 import { TimeoutError, TransportError, withTimeout } from "./timeout";
+import { calculateBackoffDelay } from "../utils/retry";
 
 export interface RetryPolicy {
   /** Total attempts, including the first. 1 disables retrying. */
@@ -254,12 +255,17 @@ export function backoffDelayMs(
   policy: RetryPolicy,
   random: () => number = Math.random
 ): number {
-  if (attempt <= 1) return 0;
-
-  const exponential = policy.initialDelayMs * 2 ** (attempt - 2);
-  const capped = Math.min(exponential, policy.maxDelayMs);
-  const jitter = capped * policy.jitterRatio * random();
-  return Math.max(0, Math.round(capped - jitter));
+  return calculateBackoffDelay(
+    attempt,
+    {
+      initialDelayMs: policy.initialDelayMs,
+      maxDelayMs: policy.maxDelayMs,
+      backoffFactor: 2,
+      jitter: true,
+      jitterRatio: policy.jitterRatio,
+    },
+    random
+  );
 }
 
 export interface RetryAttemptLog {

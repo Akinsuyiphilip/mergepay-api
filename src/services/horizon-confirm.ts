@@ -13,6 +13,7 @@
  */
 import { config } from "../config";
 import { stellar } from "./stellar";
+import { calculateBackoffDelay } from "../utils/retry";
 
 /**
  * The four terminal answers from {@link pollForConfirmation}.
@@ -73,7 +74,13 @@ export async function pollForConfirmation(
       const tx = await getTx(hash);
       if (tx === null) {
         if (attempt < maxAttempts) {
-          await sleep(delayMs);
+          const delay = calculateBackoffDelay(attempt + 1, {
+            initialDelayMs: delayMs,
+            maxDelayMs: 15_000,
+            backoffFactor: 2,
+            jitter: false,
+          });
+          await sleep(delay);
           continue;
         }
         return { status: "not_found" };
@@ -87,7 +94,13 @@ export async function pollForConfirmation(
       if (isLastAttempt) {
         return { status: "timeout" };
       }
-      await sleep(delayMs);
+      const delay = calculateBackoffDelay(attempt + 1, {
+        initialDelayMs: delayMs,
+        maxDelayMs: 15_000,
+        backoffFactor: 2,
+        jitter: false,
+      });
+      await sleep(delay);
     }
   }
 
