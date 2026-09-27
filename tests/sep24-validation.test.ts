@@ -194,6 +194,117 @@ describe("sep24WithdrawRequestSchema", () => {
   });
 });
 
+describe("SEP-24 issuer, memo and extraMetadata validation (issue #535)", () => {
+  const hashMemo = Buffer.alloc(32, 7).toString("base64");
+  const parse = (fields: Record<string, unknown>) =>
+    sep24InteractiveRequestSchema.safeParse({ assetCode: "USDC", ...fields });
+  const firstIssue = (fields: Record<string, unknown>) => {
+    const result = parse(fields);
+    return result.success ? undefined : result.error.issues[0];
+  };
+
+  it("accepts a valid Stellar public key or null as assetIssuer", () => {
+    expect(parse({ assetIssuer: goodKey }).success).toBe(true);
+    expect(parse({ assetIssuer: null }).success).toBe(true);
+  });
+
+  it("rejects an assetIssuer that is not a Stellar public key", () => {
+    expect(firstIssue({ assetIssuer: badKey })?.path).toEqual(["assetIssuer"]);
+    expect(parse({ assetIssuer: "" }).success).toBe(false);
+    expect(parse({ assetIssuer: "G".repeat(10_000) }).success).toBe(false);
+    // A secret seed must never be accepted in place of the issuer.
+    expect(parse({ assetIssuer: Keypair.random().secret() }).success).toBe(false);
+  });
+
+  it("accepts text memos with spaces and non-ASCII up to 28 UTF-8 bytes", () => {
+    expect(parse({ memo: "invoice 42 - june", memoType: "text" }).success).toBe(true);
+    expect(parse({ memo: "a".repeat(28), memoType: "text" }).success).toBe(true);
+    expect(parse({ memo: "café", memoType: "text" }).success).toBe(true);
+  });
+
+  it("rejects text memos over 28 UTF-8 bytes or with control characters", () => {
+    expect(firstIssue({ memo: "a".repeat(29), memoType: "text" })?.path).toEqual(["memo"]);
+    // 14 two-byte characters: 14 chars but 28 bytes is fine, 15 is not.
+    expect(parse({ memo: "é".repeat(14), memoType: "text" }).success).toBe(true);
+    expect(parse({ memo: "é".repeat(15), memoType: "text" }).success).toBe(false);
+    expect(parse({ memo: "line\nbreak", memoType: "text" }).success).toBe(false);
+    expect(parse({ memo: "nul\u0000", memoType: "text" }).success).toBe(false);
+  });
+
+  it("accepts id memos within the unsigned 64-bit range", () => {
+    expect(parse({ memo: "0", memoType: "id" }).success).toBe(true);
+    expect(parse({ memo: "18446744073709551615", memoType: "id" }).success).toBe(true);
+  });
+
+  it("rejects id memos that are not unsigned 64-bit integers", () => {
+    expect(firstIssue({ memo: "18446744073709551616", memoType: "id" })?.path).toEqual([
+      "memo",
+    ]);
+    expect(parse({ memo: "-1", memoType: "id" }).success).toBe(false);
+    expect(parse({ memo: "12.5", memoType: "id" }).success).toBe(false);
+    expect(parse({ memo: "abc", memoType: "id" }).success).toBe(false);
+  });
+
+  it("accepts a base64-encoded 32-byte hash memo", () => {
+    expect(parse({ memo: hashMemo, memoType: "hash" }).success).toBe(true);
+  });
+
+  it("rejects hash memos that are not base64-encoded 32-byte values", () => {
+    expect(firstIssue({ memo: "TAG", memoType: "hash" })?.path).toEqual(["memo"]);
+    expect(parse({ memo: "a".repeat(64), memoType: "hash" }).success).toBe(false);
+    expect(
+      parse({ memo: Buffer.alloc(31).toString("base64"), memoType: "hash" }).success
+    ).toBe(false);
+  });
+
+  it("applies the same memo-type rules to refundMemo", () => {
+    expect(
+      parse({ refundMemo: "refund 7", refundMemoType: "text" }).success
+    ).toBe(true);
+    expect(
+      firstIssue({ refundMemo: "not-a-number", refundMemoType: "id" })?.path
+    ).toEqual(["refundMemo"]);
+    expect(parse({ refundMemo: hashMemo, refundMemoType: "hash" }).success).toBe(true);
+  });
+
+  it("rejects any memo longer than the longest valid memo", () => {
+    expect(parse({ memo: "a".repeat(45), memoType: "hash" }).success).toBe(false);
+  });
+
+  it("accepts a small extraMetadata object", () => {
+    expect(parse({ extraMetadata: { source: "mobile", version: 3 } }).success).toBe(true);
+  });
+
+  it("rejects extraMetadata with too many keys or too large a payload", () => {
+    const manyKeys = Object.fromEntries(
+      Array.from({ length: 21 }, (_, i) => [`k${i}`, i])
+    );
+    expect(firstIssue({ extraMetadata: manyKeys })?.path).toEqual(["extraMetadata"]);
+    expect(
+      parse({ extraMetadata: { blob: "x".repeat(4096) } }).success
+    ).toBe(false);
+    expect(
+      parse({ extraMetadata: { nested: { deep: ["x".repeat(3000)] } } }).success
+    ).toBe(false);
+  });
+
+  it("enforces the same rules on the withdrawal schema", () => {
+    const base = { assetCode: "USDC", amount: "5" };
+    expect(
+      sep24WithdrawRequestSchema.safeParse({ ...base, assetIssuer: badKey }).success
+    ).toBe(false);
+    expect(
+      sep24WithdrawRequestSchema.safeParse({ ...base, memo: "abc", memoType: "id" }).success
+    ).toBe(false);
+    expect(
+      sep24WithdrawRequestSchema.safeParse({
+        ...base,
+        extraMetadata: { blob: "x".repeat(4096) },
+      }).success
+    ).toBe(false);
+  });
+});
+
 describe("POST /anchors/deposit — SEP-24 schema wiring", () => {
   const prisma = h.prisma;
   let app: Awaited<ReturnType<typeof buildApp>>;
@@ -331,6 +442,50 @@ describe("POST /api/sep24/deposit & POST /api/sep24/withdraw — SEP-24 route va
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("POST /api/sep24/deposit — returns 400 for a malformed assetIssuer before any anchor call", async () => {
+    const { anchorService } = await import("../src/services/anchor");
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/sep24/deposit",
+      headers: authHeader(),
+      payload: { assetCode: "USDC", assetIssuer: "not-a-stellar-key" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("VALIDATION_ERROR");
+    expect(anchorService.getToml).not.toHaveBeenCalled();
+    expect(prisma.anchorSession.create).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sep24/deposit — returns 400 for a memo that does not match its memoType", async () => {
+    const { anchorService } = await import("../src/services/anchor");
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/sep24/deposit",
+      headers: authHeader(),
+      payload: { assetCode: "USDC", memo: "not-an-id", memoType: "id" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("VALIDATION_ERROR");
+    expect(anchorService.getToml).not.toHaveBeenCalled();
+  });
+
+  it("POST /api/sep24/withdraw — returns 400 for oversized extraMetadata before any anchor call", async () => {
+    const { anchorService } = await import("../src/services/anchor");
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/sep24/withdraw",
+      headers: authHeader(),
+      payload: {
+        assetCode: "USDC",
+        amount: "5",
+        extraMetadata: { blob: "x".repeat(4096) },
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("VALIDATION_ERROR");
+    expect(anchorService.getToml).not.toHaveBeenCalled();
   });
 
   it("POST /api/sep24/deposit — accepts valid payload and initiates session", async () => {

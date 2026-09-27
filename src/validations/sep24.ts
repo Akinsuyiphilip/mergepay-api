@@ -46,15 +46,69 @@ export const sep24AssetCodeSchema = z
 /** SEP-24 amount: positive decimal with Stellar's 7-decimal precision. */
 export const sep24AmountSchema = stellarAmountSchema;
 
-/** SEP-24 memo: short alphanumeric anchor-side memo. */
+/** Longest valid memo of any type: a base64-encoded 32-byte hash (44 chars). */
+const SEP24_MEMO_MAX_LENGTH = 44;
+
+/** Stellar MEMO_TEXT holds at most 28 bytes. */
+const MEMO_TEXT_MAX_BYTES = 28;
+
+/** Stellar MEMO_ID is an unsigned 64-bit integer. */
+const MEMO_ID_MAX = 18446744073709551615n;
+
+/** A 32-byte value in padded base64 is 43 alphabet characters plus one `=`. */
+const MEMO_HASH_BASE64 = /^[A-Za-z0-9+/]{43}=$/;
+
+function hasControlCharacter(value: string): boolean {
+  return [...value].some((ch) => {
+    const code = ch.codePointAt(0)!;
+    return code < 0x20 || (code >= 0x7f && code <= 0x9f);
+  });
+}
+
+/**
+ * SEP-24 memo. The shape is only bounded here; the value is checked against
+ * its `memoType` (text / id / hash) by `refineMemoValue` once both are known.
+ */
 export const sep24MemoSchema = z
   .string()
-  .max(28, "memo must be at most 28 characters")
-  .regex(/^[A-Za-z0-9]+$/, "memo may only contain letters and digits")
+  .max(SEP24_MEMO_MAX_LENGTH, `memo must be at most ${SEP24_MEMO_MAX_LENGTH} characters`)
   .optional();
 
 /** The Stellar transaction-memo kind accompanying `memo`. */
 export const sep24MemoTypeSchema = z.enum(["text", "id", "hash"]);
+
+type Sep24MemoType = z.infer<typeof sep24MemoTypeSchema>;
+
+/**
+ * Check a memo value against the Stellar memo type it will be sent as:
+ *   - text: at most 28 UTF-8 bytes, no control characters;
+ *   - id:   an unsigned 64-bit integer in decimal;
+ *   - hash: 32 bytes, base64-encoded (as SEP-24 specifies for hash memos).
+ */
+function refineMemoValue(
+  memo: string,
+  memoType: Sep24MemoType,
+  field: string,
+  ctx: z.RefinementCtx
+): void {
+  let message: string | undefined;
+  if (memoType === "text") {
+    if (Buffer.byteLength(memo, "utf8") > MEMO_TEXT_MAX_BYTES) {
+      message = `${field} must be at most ${MEMO_TEXT_MAX_BYTES} UTF-8 bytes for memo type "text"`;
+    } else if (hasControlCharacter(memo)) {
+      message = `${field} must not contain control characters`;
+    }
+  } else if (memoType === "id") {
+    if (!/^\d{1,20}$/.test(memo) || BigInt(memo) > MEMO_ID_MAX) {
+      message = `${field} must be an unsigned 64-bit integer for memo type "id"`;
+    }
+  } else if (!MEMO_HASH_BASE64.test(memo) || Buffer.from(memo, "base64").length !== 32) {
+    message = `${field} must be a base64-encoded 32-byte value for memo type "hash"`;
+  }
+  if (message) {
+    ctx.addIssue({ code: "custom", path: [field], message });
+  }
+}
 
 function refineMemoPairing(
   value: { memo?: string; memoType?: "text" | "id" | "hash" },
@@ -73,6 +127,9 @@ function refineMemoPairing(
       path: ["memo"],
       message: "memo is required when memoType is supplied",
     });
+  }
+  if (value.memo && value.memoType) {
+    refineMemoValue(value.memo, value.memoType, "memo", ctx);
   }
 }
 
@@ -94,11 +151,35 @@ function refineRefundMemoPairing(
       message: "refundMemo is required when refundMemoType is supplied",
     });
   }
+  if (value.refundMemo && value.refundMemoType) {
+    refineMemoValue(value.refundMemo, value.refundMemoType, "refundMemo", ctx);
+  }
 }
+
+const SEP24_EXTRA_METADATA_MAX_KEYS = 20;
+const SEP24_EXTRA_METADATA_MAX_BYTES = 2048;
+
+function serializedByteLength(value: unknown): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(value) ?? "", "utf8");
+  } catch {
+    return Infinity;
+  }
+}
+
+/** Free-form client metadata, bounded so it cannot carry an unbounded payload. */
+export const sep24ExtraMetadataSchema = z
+  .record(z.string(), z.unknown())
+  .refine((value) => Object.keys(value).length <= SEP24_EXTRA_METADATA_MAX_KEYS, {
+    message: `extraMetadata may have at most ${SEP24_EXTRA_METADATA_MAX_KEYS} keys`,
+  })
+  .refine((value) => serializedByteLength(value) <= SEP24_EXTRA_METADATA_MAX_BYTES, {
+    message: `extraMetadata must be at most ${SEP24_EXTRA_METADATA_MAX_BYTES} bytes when serialized`,
+  });
 
 const sharedFields = {
   assetCode: sep24AssetCodeSchema,
-  assetIssuer: z.string().nullable().optional(),
+  assetIssuer: sep24AccountSchema.nullable().optional(),
   amount: sep24AmountSchema.optional(),
   account: sep24AccountSchema.optional(),
   to: sep24AccountSchema.optional(),
@@ -109,7 +190,7 @@ const sharedFields = {
   refundAddress: sep24AccountSchema.optional(),
   refundMemo: sep24MemoSchema,
   refundMemoType: sep24MemoTypeSchema.optional(),
-  extraMetadata: z.record(z.string(), z.unknown()).optional(),
+  extraMetadata: sep24ExtraMetadataSchema.optional(),
 };
 
 function validateNativeIssuer<
