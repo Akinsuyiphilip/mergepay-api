@@ -16,6 +16,8 @@ if (process.env.DATABASE_URL_TEST) {
 export default defineConfig({
   test: {
     environment: "node",
+    // Integration test suite covers full flows, security, background worker,
+    // and API contract alignment (auth, groups, expenses, settlements).
     include: ["tests/integration/**/*.test.ts"],
     exclude: ["**/node_modules/**"],
     env: {

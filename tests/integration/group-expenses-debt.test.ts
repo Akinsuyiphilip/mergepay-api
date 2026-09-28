@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeAll } from "vitest";
+import { describe, test, expect, beforeAll, beforeEach } from "vitest";
 import { Keypair } from "@stellar/stellar-sdk";
 import fetch from "node-fetch";
 import {
@@ -8,6 +8,7 @@ import {
   addMember,
   createExpense,
   API_BASE_URL,
+  isLiveServerAvailable,
 } from "./helpers";
 
 const TEST_TIMEOUT = 30000;
@@ -19,8 +20,12 @@ describe("Group Expense and Debt Simplification Integration", () => {
   let aliceToken: string;
   let bobToken: string;
   let charlieToken: string;
+  let serverAvailable = false;
 
   beforeAll(async () => {
+    serverAvailable = await isLiveServerAvailable();
+    if (!serverAvailable) return;
+
     [aliceKp, bobKp, charlieKp] = await Promise.all([
       createTestAccount(),
       createTestAccount(),
@@ -33,6 +38,12 @@ describe("Group Expense and Debt Simplification Integration", () => {
       authenticateUser(charlieKp),
     ]);
   }, TEST_TIMEOUT * 2);
+
+  beforeEach((ctx) => {
+    if (!serverAvailable) {
+      ctx.skip();
+    }
+  });
 
   test(
     "creates a group, adds expenses, and calculates simplified debt",

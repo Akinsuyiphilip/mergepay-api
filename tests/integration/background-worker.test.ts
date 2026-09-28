@@ -77,8 +77,30 @@ async function seedPendingDelivery(url: string) {
   return { delivery, groupId: group.id, userId: user.id };
 }
 
+let dbAvailable = false;
+
+beforeAll(async () => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    dbAvailable = true;
+  } catch {
+    dbAvailable = false;
+  }
+});
+
+beforeEach((ctx) => {
+  if (!dbAvailable) {
+    ctx.skip();
+  }
+});
+
 afterEach(async () => {
-  await prisma.group.deleteMany({ where: { id: { in: createdGroupIds.splice(0) } } });
+  if (!dbAvailable || !createdGroupIds.length) return;
+  try {
+    await prisma.group.deleteMany({ where: { id: { in: createdGroupIds.splice(0) } } });
+  } catch {
+    // ignore
+  }
 });
 
 describe("background worker webhook jobs", () => {
