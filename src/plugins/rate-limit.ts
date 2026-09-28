@@ -46,13 +46,27 @@ type RateLimitStoreOptions = Pick<
 >;
 
 /**
+ * Tiered rate-limit thresholds for public auth endpoints vs authenticated routes.
+ */
+export const RATE_LIMIT_TIERS = {
+  publicAuth: {
+    max: config.RATE_LIMIT_AUTH_VERIFY_MAX,
+    timeWindow: config.RATE_LIMIT_AUTH_VERIFY_WINDOW_MS,
+  },
+  authenticated: {
+    max: config.RATE_LIMIT_GLOBAL_MAX,
+    timeWindow: config.RATE_LIMIT_GLOBAL_WINDOW_MS,
+  },
+} as const;
+
+/**
  * Global-policy key. Unlike the per-route policies (which run on `preHandler`
  * and can read `req.user`), the global limiter runs on `onRequest`, before any
  * route's authenticate hook, so it resolves the identity from the bearer token
  * itself. An unparseable token deliberately falls back to the client IP so
  * invalid credentials share one bucket instead of minting a fresh one each try.
  */
-function globalRateLimitKey(request: FastifyRequest): string {
+export function globalRateLimitKey(request: FastifyRequest): string {
   const authorization = request.headers.authorization;
   if (authorization?.startsWith("Bearer ")) {
     try {
@@ -63,6 +77,24 @@ function globalRateLimitKey(request: FastifyRequest): string {
     }
   }
   return `global:ip:${request.ip}`;
+}
+
+/**
+ * Custom key generator identifying authenticated user identity from JWT or falling back to IP.
+ */
+export function authenticatedOrIpKey(prefix: string) {
+  return (req: FastifyRequest): string => {
+    const authorization = req.headers.authorization;
+    if (authorization?.startsWith("Bearer ")) {
+      try {
+        const user = verifyToken(authorization.slice("Bearer ".length).trim());
+        return `${prefix}:user:${user.id}`;
+      } catch {
+        // Fall back to client IP for unauthenticated / invalid token
+      }
+    }
+    return `${prefix}:ip:${req.ip}`;
+  };
 }
 
 /**

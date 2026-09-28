@@ -33,3 +33,34 @@ export {
   type Sep24DepositRequest,
   type Sep24WithdrawRequest,
 } from "../validations/sep24";
+
+import type { FastifyRequest, FastifyReply } from "fastify";
+import {
+  sep24DepositRequestSchema,
+  sep24WithdrawRequestSchema,
+  sep24InitQuerySchema,
+} from "../validations/sep24";
+
+/**
+ * Request validation middleware for SEP-24 deposit initiation endpoint.
+ * Validates query parameters and request body using Zod schemas.
+ */
+export async function validateSep24Deposit(
+  req: FastifyRequest,
+  _reply: FastifyReply
+): Promise<void> {
+  req.query = sep24InitQuerySchema.parse(req.query ?? {});
+  req.body = sep24DepositRequestSchema.parse(req.body);
+}
+
+/**
+ * Request validation middleware for SEP-24 withdrawal initiation endpoint.
+ * Validates query parameters and request body using Zod schemas.
+ */
+export async function validateSep24Withdraw(
+  req: FastifyRequest,
+  _reply: FastifyReply
+): Promise<void> {
+  req.query = sep24InitQuerySchema.parse(req.query ?? {});
+  req.body = sep24WithdrawRequestSchema.parse(req.body);
+}
