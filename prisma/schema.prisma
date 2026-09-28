@@ -76,6 +76,7 @@ model GroupMember {
   @@unique([groupId, userId])
   @@index([userId])
   @@index([groupId])
+  @@index([role])
   @@map("group_members")
 }
 model Expense {
@@ -215,6 +216,7 @@ model TreasuryTransaction {
   @@index([groupId])
   @@index([status])
   @@index([expiresAt])
+  @@index([groupId, status])
   @@map("treasury_transactions")
 }
 
@@ -351,6 +353,7 @@ model TreasuryProposal {
   @@index([groupId])
   @@index([status])
   @@index([creatorId])
+  @@index([status, createdAt])
   @@map("treasury_proposals")
 }
 
@@ -489,6 +492,7 @@ model AuditLog {
 
   @@index([userId])
   @@index([groupId])
+  @@index([entityType, entityId])
   @@map("audit_logs")
 }
 
