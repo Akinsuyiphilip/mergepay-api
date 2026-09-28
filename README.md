@@ -195,6 +195,28 @@ See [.env.example](.env.example). Key ones:
 | `ANCHOR_WEBHOOK_SECRET` | Shared secret for the anchor webhook |
 | `STABLE_ASSET_CODE` / `STABLE_ASSET_ISSUER` | Stable asset for settlement |
 
+#### Database connection & query timeouts
+
+Prisma is initialized in [src/db.ts](src/db.ts) with explicit connection
+resilience settings so a slow, saturated, or partitioned PostgreSQL **fails
+fast instead of hanging request workers indefinitely**. The values below are
+appended to `DATABASE_URL` as query parameters (`buildDatasourceUrl`) and
+forwarded to the underlying driver; a per-query middleware adds a wall-clock
+budget on top.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DATABASE_CONNECT_TIMEOUT_SECONDS` | 10 | Max time to establish a socket to Postgres |
+| `DATABASE_POOL_TIMEOUT_SECONDS` | 10 | Max wait for a free pooled connection before erroring |
+| `DATABASE_CONNECTION_LIMIT` | 5 | Max pooled connections per instance |
+| `DATABASE_QUERY_TIMEOUT_MS` | 10000 | Per-query wall-clock budget enforced by middleware |
+
+Parameters already present in `DATABASE_URL` are overridden by these values,
+so the effective timeout policy is always the one configured here. When a
+query exceeds `DATABASE_QUERY_TIMEOUT_MS` it rejects with `Query timeout after
+Nms`, the request fails promptly, and the health check
+(`checkDatabaseConnection`, used by `/health/ready`) applies the same budget.
+
 #### CORS configuration
 
 Cross-origin access for the frontend (`mergepay-web`) is configured entirely

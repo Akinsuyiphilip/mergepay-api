@@ -26,10 +26,7 @@ import { requireUser } from "../plugins/auth";
 import { requireGroupRole } from "../plugins/group-access";
 import { getTreasuryAccount } from "../services/treasury-stellar";
 import { isPositive } from "../services/money";
-import {
-  serializeGroup,
-  serializeTreasuryProposal,
-} from "../serializers";
+import { serializeGroup, serializeTreasuryProposal } from "../serializers";
 import { treasuryProposalsService } from "../services/treasury-proposals";
 import {
   buildPage,

@@ -150,3 +150,39 @@ export function auditGroupMemberActionTx(
     metadata: params.metadata,
   });
 }
+
+export interface MultisigAuditParams {
+  userId?: string | null;
+  groupId: string;
+  proposalId: string;
+  action:
+    | typeof AuditAction.TREASURY_PROPOSAL_CREATED
+    | typeof AuditAction.TREASURY_PROPOSAL_SIGNED
+    | typeof AuditAction.TREASURY_PROPOSAL_SUBMITTED
+    | typeof AuditAction.TREASURY_PROPOSAL_FAILED
+    | string;
+  actorPublicKey?: string | null;
+  outcome?: AuditOutcome;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Transactional audit logging helper for treasury multisig operations.
+ * Records multisig proposal creation, signature collection, and submission events
+ * atomically within a database transaction.
+ */
+export async function auditMultisigActionTx(
+  tx: Prisma.TransactionClient,
+  params: MultisigAuditParams
+): Promise<void> {
+  await auditTx(tx, {
+    userId: params.userId ?? null,
+    groupId: params.groupId,
+    actorPublicKey: params.actorPublicKey ?? null,
+    action: params.action,
+    entityType: "treasury_proposal",
+    entityId: params.proposalId,
+    outcome: params.outcome ?? "success",
+    metadata: params.metadata,
+  });
+}

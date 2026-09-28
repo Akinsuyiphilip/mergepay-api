@@ -476,6 +476,8 @@ model IdempotencyKey {
   @@map("idempotency_keys")
 }
 
+/// Structured audit log records for state-changing operations including
+/// treasury multisig proposals, signature collections, and submissions.
 model AuditLog {
   id         String   @id @default(cuid())
   userId     String?  @map("user_id")
